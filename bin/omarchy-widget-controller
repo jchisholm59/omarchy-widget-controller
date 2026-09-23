@@ -1,0 +1,195 @@
+#!/bin/bash
+
+# omarchy:summary=Manage taskbar widgets: list, remove, move, or install from the plugin marketplace
+
+# A little front-end over the omarchy plugin/bar CLI, in the same
+# omarchy-menu-select picker style as omarchy-menu-plugin. Two flows:
+#   1. Installed Widgets  — list bar-widgets, move between sections, remove
+#      from the bar (disable), or uninstall a third-party one entirely.
+#   2. Browse Plugin Marketplace — the community registry behind
+#      plugins.omarchy.org, cached locally, install by picking one.
+
+set -euo pipefail
+
+WIDGET_ICON=$'\U000f0431'
+CACHE_DIR="$HOME/.cache/omarchy-widget-controller"
+REGISTRY_CACHE="$CACHE_DIR/registry.json"
+REGISTRY_URL="https://raw.githubusercontent.com/omacom/omarchy-plugin-marketplace/main/registry.json"
+REGISTRY_MAX_AGE=86400 # 24h — it's a ~7MB file, not worth refetching every browse
+
+mkdir -p "$CACHE_DIR"
+
+notify() { omarchy-notification-send "$1" "${2:-}"; }
+
+# ------------------------------------------------------------- installed --
+
+widget_section_map() {
+  jq -c '
+    (.bar.layout // {}) as $l
+    | reduce (["left","center","right"][]) as $sec
+        ({}; . + (reduce (($l[$sec] // [])[]) as $w (.; .[$w.id] = $sec)))
+  ' "$HOME/.config/omarchy/shell.json" 2>/dev/null || echo '{}'
+}
+
+installed_widgets_menu() {
+  local plugins sections rows selection id
+  plugins=$(omarchy-plugin-list --json)
+  sections=$(widget_section_map)
+
+  rows=$(jq -r --arg icon "$WIDGET_ICON" --argjson sections "$sections" '
+    .[] | select(.kinds | index("bar-widget"))
+    | ($sections[.id] // "off") as $where
+    | $icon + "\t" + .name + "  [" + (if .enabled then $where else "disabled" end) + "]" + "\t" + .id
+  ' <<<"$plugins")
+
+  [[ -n $rows ]] || { notify "No bar widgets installed"; return 0; }
+
+  selection=$(omarchy-menu-select "Installed Widgets" <<<"$rows") || return 0
+  [[ -n $selection ]] || return 0
+  id=$(cut -f2 <<<"$selection")
+  [[ -n $id ]] || return 1
+
+  widget_action_menu "$id"
+}
+
+widget_action_menu() {
+  local id="$1" info enabled first_party options=() action section
+  info=$(omarchy-plugin-list --json | jq -c --arg id "$id" 'map(select(.id==$id))[0]')
+  enabled=$(jq -r '.enabled' <<<"$info")
+  first_party=$(jq -r '.firstParty' <<<"$info")
+
+  if [[ $enabled == "true" ]]; then
+    options+=("Move to a different section")
+    options+=("Remove from taskbar")
+  else
+    options+=("Add to taskbar")
+  fi
+  [[ $first_party == "false" ]] && options+=("Uninstall completely")
+
+  action=$(omarchy-menu-select "$id" "${options[@]}") || return 0
+  [[ -n $action ]] || return 0
+
+  case "$action" in
+    "Move to a different section")
+      section=$(omarchy-menu-select "Move $id to" Left Center Right) || return 0
+      [[ -n $section ]] || return 0
+      omarchy-bar move "$id" --section "${section,,}"
+      notify "Moved" "$id -> ${section}"
+      ;;
+    "Remove from taskbar")
+      omarchy-plugin-disable "$id"
+      notify "Removed from taskbar" "$id (still installed — re-add it any time)"
+      ;;
+    "Add to taskbar")
+      section=$(omarchy-menu-select "Add $id to" Left Center Right) || return 0
+      [[ -n $section ]] || return 0
+      omarchy-plugin-enable "$id" --section "${section,,}"
+      notify "Added to taskbar" "$id -> ${section}"
+      ;;
+    "Uninstall completely")
+      omarchy-launch-floating-terminal-with-presentation "omarchy plugin remove $(printf '%q' "$id")"
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------ marketplace --
+
+refresh_registry() {
+  local tmp="$REGISTRY_CACHE.tmp.$$"
+  if curl -fsSL --max-time 20 "$REGISTRY_URL" -o "$tmp"; then
+    mv "$tmp" "$REGISTRY_CACHE"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+ensure_registry() {
+  local age=999999999
+  if [[ -f $REGISTRY_CACHE ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$REGISTRY_CACHE") ))
+  fi
+  if (( age > REGISTRY_MAX_AGE )); then
+    notify "Updating plugin marketplace listing…"
+    if ! refresh_registry && [[ ! -f $REGISTRY_CACHE ]]; then
+      notify "Couldn't reach the plugin marketplace" "check your connection and try again"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Flattens the registry's two source shapes into one pickable row per
+# plugin: a "suite" source carries full catalog metadata directly; a
+# "plugin-source" source instead carries a repo plus a plugins{} map (one
+# repo can publish several plugin ids), with thinner per-plugin metadata.
+# Retired plugin ids and rows missing a repo/name are dropped. A row whose
+# automated security scan came back "review-required" is flagged — not a
+# verdict, just "look before you add this one".
+marketplace_rows() {
+  jq -r --arg icon "$WIDGET_ICON" '
+    .retiredPluginIds as $retired
+    | [
+        .sources[]
+        | if .type == "suite" then
+            {repo: .repo, name: (.catalog.name // (.repo | split("/") | last)),
+             desc: (.catalog.description // ""), tags: (.catalog.tags // []),
+             security: null}
+          else
+            . as $src
+            | ($src.plugins // {}) | to_entries[]
+            | select(([.key] - $retired) == [.key])
+            | {repo: $src.repo, name: .key,
+               desc: (.value.category // ""), tags: (.value.tags // []),
+               security: ($src.automatedSecurityBaseline.outcome // null)}
+          end
+      ]
+    | .[]
+    | select(.repo != null and .name != null and .name != "")
+    | $icon + "\t" +
+      (.name +
+       (if .desc != "" then " — " + .desc else "" end) +
+       (if (.tags | length) > 0 then " [" + (.tags | join(", ")) + "]" else "" end) +
+       (if .security == "review-required" then " ⚠" else "" end)
+      ) + "\t" + .repo
+  ' "$REGISTRY_CACHE" 2>/dev/null
+}
+
+browse_marketplace_menu() {
+  ensure_registry || return 1
+
+  local rows selection repo
+  rows=$(marketplace_rows | sort -u -t$'\t' -k2)
+  [[ -n $rows ]] || { notify "No plugins found in the marketplace"; return 0; }
+
+  selection=$(omarchy-menu-select "Browse Plugin Marketplace" -- --width 900 <<<"$rows") || return 0
+  [[ -n $selection ]] || return 0
+  repo=$(cut -f2 <<<"$selection")
+  [[ -n $repo ]] || return 1
+
+  # omarchy-plugin-add itself shows the "plugins run as unsandboxed code"
+  # warning and asks for confirmation — this just hands it the URL picked
+  # above instead of making the user go copy it from a browser tab.
+  omarchy-launch-floating-terminal-with-presentation "omarchy plugin add $(printf '%q' "$repo") --enable"
+}
+
+# ------------------------------------------------------------------- main --
+
+main() {
+  local choice
+  choice=$(omarchy-menu-select "Widget Controller" \
+    "Installed Widgets" \
+    "Browse Plugin Marketplace" \
+    "Refresh Marketplace Listing") || exit 0
+  [[ -n $choice ]] || exit 0
+
+  case "$choice" in
+    "Installed Widgets") installed_widgets_menu ;;
+    "Browse Plugin Marketplace") browse_marketplace_menu ;;
+    "Refresh Marketplace Listing")
+      refresh_registry && notify "Marketplace listing updated" || notify "Refresh failed"
+      ;;
+  esac
+}
+
+main

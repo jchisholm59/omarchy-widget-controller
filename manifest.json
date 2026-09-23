@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "jim.widget-controller",
+  "name": "Widget Controller",
+  "version": "1.0.0",
+  "author": "jim",
+  "license": "MIT",
+  "description": "List, remove, and move installed taskbar widgets; browse and install widgets from the plugins.omarchy.org community marketplace.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Widget Controller",
+    "description": "Manage taskbar widgets and browse the plugin marketplace.",
+    "category": "Desktop",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
