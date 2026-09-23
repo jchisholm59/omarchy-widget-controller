@@ -155,25 +155,101 @@ marketplace_rows() {
   ' "$REGISTRY_CACHE" 2>/dev/null
 }
 
-browse_marketplace_menu() {
-  ensure_registry || return 1
+# Plain-text variant of marketplace_rows for gum filter (no icon/tab
+# structure — just a display line with the repo URL parenthesized at the
+# end for extract_repo_from_filter_line to pull back out).
+marketplace_rows_for_filter() {
+  jq -r '
+    .retiredPluginIds as $retired
+    | [
+        .sources[]
+        | if .type == "suite" then
+            {repo: .repo, name: (.catalog.name // (.repo | split("/") | last)),
+             desc: (.catalog.description // ""), tags: (.catalog.tags // []),
+             security: null}
+          else
+            . as $src
+            | ($src.plugins // {}) | to_entries[]
+            | select(([.key] - $retired) == [.key])
+            | {repo: $src.repo, name: .key,
+               desc: (.value.category // ""), tags: (.value.tags // []),
+               security: ($src.automatedSecurityBaseline.outcome // null)}
+          end
+      ]
+    | .[]
+    | select(.repo != null and .name != null and .name != "")
+    | (.name +
+       (if .desc != "" then " — " + .desc else "" end) +
+       (if (.tags | length) > 0 then " [" + (.tags | join(", ")) + "]" else "" end) +
+       (if .security == "review-required" then " ⚠" else "" end) +
+       "  (" + .repo + ")"
+      )
+  ' "$REGISTRY_CACHE" 2>/dev/null
+}
 
-  local rows selection repo
-  rows=$(marketplace_rows | sort -u -t$'\t' -k2)
-  [[ -n $rows ]] || { notify "No plugins found in the marketplace"; return 0; }
+extract_repo_from_filter_line() {
+  sed -n 's/.*(\(https:\/\/[^)]*\))[[:space:]]*$/\1/p' <<<"$1"
+}
 
-  selection=$(omarchy-menu-select "Browse Plugin Marketplace" -- --width 900 <<<"$rows") || return 0
-  [[ -n $selection ]] || return 0
-  repo=$(cut -f2 <<<"$selection")
-  [[ -n $repo ]] || return 1
-
+# Runs inside the floating terminal launched by browse_marketplace_menu
+# below (see there for why this is a separate mode rather than inline).
+install_from_marketplace_file() {
+  local rows_file="$1" selection repo
+  if [[ ! -s $rows_file ]]; then
+    echo "Marketplace listing file missing or empty." >&2
+    rm -f "$rows_file"
+    exit 1
+  fi
+  selection=$(gum filter --header "Browse Plugin Marketplace (type to search)" --height 25 --width 110 <"$rows_file") || {
+    rm -f "$rows_file"
+    exit 0
+  }
+  rm -f "$rows_file"
+  repo=$(extract_repo_from_filter_line "$selection")
+  if [[ -z $repo ]]; then
+    echo "Could not find a repo URL in: $selection" >&2
+    exit 1
+  fi
   # omarchy-plugin-add itself shows the "plugins run as unsandboxed code"
   # warning and asks for confirmation — this just hands it the URL picked
   # above instead of making the user go copy it from a browser tab.
-  omarchy-launch-floating-terminal-with-presentation "omarchy plugin add $(printf '%q' "$repo") --enable"
+  omarchy plugin add "$repo" --enable
+}
+
+browse_marketplace_menu() {
+  ensure_registry || return 1
+
+  local rows_file
+  rows_file=$(mktemp)
+  marketplace_rows_for_filter | sort -u > "$rows_file"
+
+  if [[ ! -s $rows_file ]]; then
+    rm -f "$rows_file"
+    notify "No plugins found in the marketplace"
+    return 0
+  fi
+
+  # omarchy-menu-select's picker is the shell's own overlay (rendered via
+  # `omarchy-shell shell summon omarchy.menu`) — built for a short list of
+  # options (works fine for the ~20-entry Installed Widgets menu above),
+  # not ~4000 marketplace entries: that payload made the shell time out
+  # ("omarchy-shell is not responding") rather than show anything, which is
+  # what actually broke this. A floating terminal running `gum filter`
+  # handles a list this size natively (fuzzy filter-as-you-type, no payload
+  # size limit) — passed as a file rather than inline, since a few hundred
+  # KB of text doesn't belong embedded in a shell command string.
+  omarchy-launch-floating-terminal-with-presentation \
+    "$(printf '%q' "$0") --install-from-marketplace $(printf '%q' "$rows_file")"
 }
 
 # ------------------------------------------------------------------- main --
+
+# Internal mode: invoked by browse_marketplace_menu inside the floating
+# terminal it launches, never called directly by a person.
+if [[ ${1:-} == "--install-from-marketplace" ]]; then
+  install_from_marketplace_file "$2"
+  exit $?
+fi
 
 main() {
   local choice
