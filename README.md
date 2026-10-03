@@ -21,6 +21,15 @@ omarchy plugin add https://github.com/jchisholm59/omarchy-widget-controller.git 
 That's it — the bundled script (`bin/omarchy-widget-controller`) needs
 nothing installed separately or added to `PATH`.
 
+<p><img src="preview.png" alt="Browse Plugin Marketplace: fuzzy search over the community registry, with category, tags, a warning mark for plugins flagged for review, and the repo for each" width="640"></p>
+
+## Remove
+
+```bash
+omarchy plugin remove jim.widget-controller
+rm -rf ~/.cache/omarchy-widget-controller   # optional: the cached marketplace listing
+```
+
 ## Use
 
 Click the puzzle-piece icon in the bar:
@@ -39,5 +48,7 @@ Click the puzzle-piece icon in the bar:
 
 ## Requirements
 
-Just Omarchy itself — `jq` and `curl` (both already part of a stock Omarchy
-install) are the only dependencies.
+Just Omarchy itself: `jq`, `curl` and `gum` (all part of a stock Omarchy install) are the only dependencies.
+No sudo. The only network access is a download of the public marketplace `registry.json` from GitHub
+(cached in `~/.cache/omarchy-widget-controller/` for 24h); installs go through Omarchy's own
+`omarchy plugin add`, which shows its warning and asks for confirmation.
