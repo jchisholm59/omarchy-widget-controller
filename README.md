@@ -49,6 +49,6 @@ Click the puzzle-piece icon in the bar:
 ## Requirements
 
 Just Omarchy itself: `jq`, `curl` and `gum` (all part of a stock Omarchy install) are the only dependencies.
-No sudo. The only network access is a download of the public marketplace `registry.json` from GitHub
+No sudo or pkexec is required. The only network access is a download of the public marketplace `registry.json` from GitHub
 (cached in `~/.cache/omarchy-widget-controller/` for 24h); installs go through Omarchy's own
 `omarchy plugin add`, which shows its warning and asks for confirmation.
